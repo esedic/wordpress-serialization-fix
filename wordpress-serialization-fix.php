@@ -2,11 +2,19 @@
 /**
  * Plugin Name: Wordpress Serialization Fix
  * Plugin Uri: https://github.com/mateus007/wordpress-serialization-fix
- * Description: Fix the broken serialized strings in the mysql database
- * Version:     1.0.0
- * Author:      Mateus Souza
+ * Description: Fix broken serialized strings in Wordpress MySQL database
+ * Version: 1.1.0
+ * Author: Mateus Souza
  */
 
+add_action('setup_theme', 'serializationFixRunScript', 1);
+add_action('admin_menu', 'serializationFixAddMenu');
+add_action('admin_notices', 'serializationFixedNotice');
+
+/**
+ * Add serialization fix menu
+ * @return void
+ */
 function serializationFixAddMenu() {
 	add_submenu_page(
 		'tools.php',
@@ -17,92 +25,156 @@ function serializationFixAddMenu() {
 		'serializationFixAdmin'
 	);
 }
-add_action( 'admin_menu', 'serializationFixAddMenu' );
 
+/**
+ * Show admin interface
+ * @return void
+ */
 function serializationFixAdmin(){
+	global $wpdb;
+	$prefix = $wpdb->base_prefix;
+
 	?>
 	<div class="wrap">
 
 		<h2>Wordpress Serialization Fix</h2>
 
-		<?php if($_POST['action'] AND $_POST['action']  == 'fix'): ?>
-			<?php serializationFixRunScript() ?>
-			<div class="updated settings-error"><p><strong>Database fixed!</strong></p></div>
-		<?php endif ?>
-
 		<form method="POST" action="#">
-			<p>This plugin fix the tables: <b>##_options</b>, <b>##_postmeta</b> and <b>##_usermeta</b> (##_ is the table prefix, like <em>wp_</em>).</p>
+			<p>This plugin will automatically fix the following tables:<br/>
+				- <b><?php echo $prefix ?>options</b><br/>
+				- <b><?php echo $prefix ?>postmeta</b><br/>
+				- <b><?php echo $prefix ?>usermeta</b></p>
 			<input type="hidden" name="action" value="fix">
-			<input type="submit" name="submit" id="submit" class="button button-primary" value="Fix database!">
+			<input type="submit" name="submit" id="submit" class="button button-primary" value="Click to Fix Database!">
 		</form>
 
 	</div>
 <?php
 }
 
+/**
+ * Run serialization fix script
+ * @return int
+ */
 function serializationFixRunScript(){
-	global $wpdb;
+	global $wpdb, $serializationFixedCount;
+
+	$count = 0;
 
 	// OPTIONS
-	$sql = "SELECT option_id, option_value FROM $wpdb->options";
+	$sql = "SELECT * FROM $wpdb->options WHERE option_value RLIKE 's:'";
 	$options = $wpdb->get_results($sql);
 
-	foreach ( $options as $option ) {
+	foreach( $options as $option ){
 
-		$fixedString = serializationFixRecalculateLength($option->option_value);
-		if( $fixedString == $option->option_value ){
+		$string = serializationFixString($option->option_value);
+
+		if( $string == $option->option_value ){
 			continue;
 		}
 
-		$wpdb->update(
-			$wpdb->options,
-			array('option_value' => $fixedString), // data
-			array('option_id'	=> $option->option_id) // where
+		$count++;
+
+		update_option(
+			$option->option_name,
+			unserialize($string),
+			$option->autoload
 		);
 
 	}
 
 	// POSTS META
-	$sql = "SELECT meta_id, meta_value FROM $wpdb->postmeta";
+	$sql = "SELECT * FROM $wpdb->postmeta WHERE meta_value RLIKE 's:'";
 	$metas = $wpdb->get_results($sql);
 
-	foreach ( $metas as $meta ) {
+	foreach( $metas as $meta ){
 
-		$fixedString = serializationFixRecalculateLength($meta->meta_value);
-		if( $fixedString == $meta->meta_value ){
+		$string = serializationFixString($meta->meta_value);
+
+		if( $string == $meta->meta_value ){
 			continue;
 		}
 
-		$wpdb->update(
-			$wpdb->postmeta,
-			array('meta_value' => $fixedString), // data
-			array('meta_id'	=> $meta->meta_id) // where
+		$count++;
+
+		update_post_meta(
+			$meta->post_id,
+			$meta->meta_key,
+			unserialize($string)
 		);
 
 	}
 
 	// USER META
-	$sql = "SELECT umeta_id, meta_value FROM $wpdb->usermeta";
+	$sql = "SELECT * FROM $wpdb->usermeta WHERE meta_value RLIKE 's:'";
 	$metas = $wpdb->get_results($sql);
 
-	foreach ( $metas as $meta ) {
+	foreach( $metas as $meta ){
 
-		$fixedString = serializationFixRecalculateLength($meta->meta_value);
-		if( $fixedString == $meta->meta_value ){
+		$string = serializationFixString($meta->meta_value);
+
+		if( $string == $meta->meta_value ){
 			continue;
 		}
 
-		$wpdb->update(
-			$wpdb->usermeta,
-			array('meta_value' => $fixedString), // data
-			array('umeta_id'	=> $meta->umeta_id) // where
+		$count++;
+
+		update_user_meta(
+			$meta->user_id,
+			$meta->meta_key,
+			unserialize($string)
 		);
 
 	}
 
+	$serializationFixedCount = $count;
+	return $count;
 }
 
-function serializationFixRecalculateLength($string) {
-   $string = preg_replace('!s:(\d+):"(.*?)";!e', "'s:'.strlen('$2').':\"$2\";'", $string);
-   return $string;
+/**
+ * Show serialization fixed notice
+ * @return void
+ */
+function serializationFixedNotice(){
+	global $serializationFixedCount;
+
+	if( !isset($serializationFixedCount)
+		OR !$serializationFixedCount ){
+		return;
+	}
+    ?>
+    <div class="updated notice">
+        <p><strong>Database automatically fixed by Serialization Fix!</strong> <?php echo $serializationFixedCount ?> record(s) updated.</p></p>
+    </div>
+    <?php
+}
+
+/**
+ * Fix broken serialized strings by recalculating length
+ * @param string $string
+ * @return string
+ */
+function serializationFixString($string){
+
+	if( !is_serialized($string) ){
+		return $string;
+	}
+
+	try {
+
+		if( unserialize($string) == FALSE ){
+			throw new Exception("Broken string", 1);
+		}
+
+	} catch(exception $e) {
+
+		$string = preg_replace(
+			'!s:(\d+):"(.*?)";!e',
+			"'s:'.strlen('$2').':\"$2\";'",
+			$string
+		);
+
+	}
+
+	return $string;
 }
